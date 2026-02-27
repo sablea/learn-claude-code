@@ -77,6 +77,9 @@ import os
 import subprocess
 import sys
 import time
+import json
+import importlib
+from typing import Any, Optional
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -84,21 +87,24 @@ from dotenv import load_dotenv
 load_dotenv()
 
 try:
-    from anthropic import Anthropic
+    OpenAI = importlib.import_module("openai").OpenAI
 except ImportError:
-    sys.exit("Please install: pip install anthropic python-dotenv")
+    sys.exit("Please install: pip install openai python-dotenv")
 
 
 # =============================================================================
 # Configuration
 # =============================================================================
 
-API_KEY = os.getenv("ANTHROPIC_API_KEY")
-BASE_URL = os.getenv("ANTHROPIC_BASE_URL")
-MODEL = os.getenv("MODEL_NAME", "claude-sonnet-4-20250514")
+API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+BASE_URL = os.getenv("OPENAI_BASE_URL") or os.getenv("ANTHROPIC_BASE_URL")
+MODEL = os.getenv("MODEL_NAME", "gpt-4.1-mini")
 WORKDIR = Path.cwd()
 
-client = Anthropic(api_key=API_KEY, base_url=BASE_URL) if BASE_URL else Anthropic(api_key=API_KEY)
+if not API_KEY:
+    sys.exit("Missing API key: set OPENAI_API_KEY")
+
+client = OpenAI(api_key=API_KEY, base_url=BASE_URL) if BASE_URL else OpenAI(api_key=API_KEY)
 
 
 # =============================================================================
@@ -334,6 +340,21 @@ Example uses:
 ALL_TOOLS = BASE_TOOLS + [TASK_TOOL]
 
 
+def to_openai_tools(tools: list) -> list:
+    """Convert tool schemas to OpenAI function-calling format."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t["input_schema"],
+            },
+        }
+        for t in tools
+    ]
+
+
 def get_tools_for_agent(agent_type: str) -> list:
     """
     Filter tools based on agent type.
@@ -375,7 +396,7 @@ def run_bash(cmd: str) -> str:
         return f"Error: {e}"
 
 
-def run_read(path: str, limit: int = None) -> str:
+def run_read(path: str, limit: Optional[int] = None) -> str:
     """Read file contents."""
     try:
         lines = safe_path(path).read_text().splitlines()
@@ -460,7 +481,7 @@ Complete the task and return a clear, concise summary."""
 
     # ISOLATED message history - this is the key!
     # The subagent starts fresh, doesn't see parent's conversation
-    sub_messages = [{"role": "user", "content": prompt}]
+    sub_messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
 
     # Progress tracking
     print(f"  [{agent_type}] {description}")
@@ -469,28 +490,34 @@ Complete the task and return a clear, concise summary."""
 
     # Run the same agent loop (silently - don't print to main chat)
     while True:
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=MODEL,
-            system=sub_system,
-            messages=sub_messages,
-            tools=sub_tools,
+            messages=[{"role": "system", "content": sub_system}, *sub_messages],
+            tools=to_openai_tools(sub_tools),
             max_tokens=8000,
         )
+        message = response.choices[0].message
+        tool_calls = message.tool_calls or []
 
-        if response.stop_reason != "tool_use":
+        if not tool_calls:
             break
 
-        tool_calls = [b for b in response.content if b.type == "tool_use"]
-        results = []
+        assistant_tool_calls = []
+        tool_messages = []
 
         for tc in tool_calls:
             tool_count += 1
-            output = execute_tool(tc.name, tc.input)
-            results.append({
-                "type": "tool_result",
-                "tool_use_id": tc.id,
-                "content": output
+            args = parse_tool_args(tc.function.arguments)
+            output = execute_tool(tc.function.name, args)
+            assistant_tool_calls.append({
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
             })
+            tool_messages.append({"role": "tool", "tool_call_id": tc.id, "content": output})
 
             # Update progress line (in-place)
             elapsed = time.time() - start
@@ -499,8 +526,12 @@ Complete the task and return a clear, concise summary."""
             )
             sys.stdout.flush()
 
-        sub_messages.append({"role": "assistant", "content": response.content})
-        sub_messages.append({"role": "user", "content": results})
+        sub_messages.append({
+            "role": "assistant",
+            "content": message.content or "",
+            "tool_calls": assistant_tool_calls,
+        })
+        sub_messages.extend(tool_messages)
 
     # Final progress update
     elapsed = time.time() - start
@@ -510,19 +541,19 @@ Complete the task and return a clear, concise summary."""
 
     # Extract and return only the final text
     # This is what the parent agent sees - a clean summary
-    for block in response.content:
-        if hasattr(block, "text"):
-            return block.text
+    if message.content:
+        return message.content
 
     return "(subagent returned no text)"
 
 
-def execute_tool(name: str, args: dict) -> str:
+def execute_tool(name: str, args: dict[str, Any]) -> str:
     """Dispatch tool call to implementation."""
     if name == "bash":
         return run_bash(args["command"])
     if name == "read_file":
-        return run_read(args["path"], args.get("limit"))
+        limit = args.get("limit")
+        return run_read(args["path"], int(limit) if limit is not None else None)
     if name == "write_file":
         return run_write(args["path"], args["content"])
     if name == "edit_file":
@@ -534,11 +565,21 @@ def execute_tool(name: str, args: dict) -> str:
     return f"Unknown tool: {name}"
 
 
+def parse_tool_args(arguments: str) -> dict[str, Any]:
+    """Parse tool-call JSON arguments safely."""
+    if not arguments:
+        return {}
+    try:
+        return json.loads(arguments)
+    except Exception:
+        return {}
+
+
 # =============================================================================
 # Main Agent Loop
 # =============================================================================
 
-def agent_loop(messages: list) -> list:
+def agent_loop(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     Main agent loop with subagent support.
 
@@ -546,48 +587,58 @@ def agent_loop(messages: list) -> list:
     When model calls Task, it spawns a subagent with isolated context.
     """
     while True:
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=MODEL,
-            system=SYSTEM,
-            messages=messages,
-            tools=ALL_TOOLS,
+            messages=[{"role": "system", "content": SYSTEM}, *messages],
+            tools=to_openai_tools(ALL_TOOLS),
             max_tokens=8000,
         )
+        message = response.choices[0].message
 
         tool_calls = []
-        for block in response.content:
-            if hasattr(block, "text"):
-                print(block.text)
-            if block.type == "tool_use":
-                tool_calls.append(block)
+        if message.content:
+            print(message.content)
+        if message.tool_calls:
+            tool_calls.extend(message.tool_calls)
 
-        if response.stop_reason != "tool_use":
-            messages.append({"role": "assistant", "content": response.content})
+        if not tool_calls:
+            messages.append({"role": "assistant", "content": message.content or ""})
             return messages
 
-        results = []
+        assistant_tool_calls = []
+        tool_messages = []
         for tc in tool_calls:
-            # Task tool has special display handling
-            if tc.name == "Task":
-                print(f"\n> Task: {tc.input.get('description', 'subtask')}")
-            else:
-                print(f"\n> {tc.name}")
+            args = parse_tool_args(tc.function.arguments)
 
-            output = execute_tool(tc.name, tc.input)
+            # Task tool has special display handling
+            if tc.function.name == "Task":
+                print(f"\n> Task: {args.get('description', 'subtask')}")
+            else:
+                print(f"\n> Just tool: {tc.function.name}")
+
+            output = execute_tool(tc.function.name, args)
 
             # Don't print full Task output (it manages its own display)
-            if tc.name != "Task":
+            if tc.function.name != "Task":
                 preview = output[:200] + "..." if len(output) > 200 else output
-                print(f"  {preview}")
+                print(f"tool result  {preview}")
 
-            results.append({
-                "type": "tool_result",
-                "tool_use_id": tc.id,
-                "content": output
-            })
+            assistant_tool_calls.append({
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            })# 记录“助手刚刚请求了哪些工具调用”,一问
+            tool_messages.append({"role": "tool", "tool_call_id": tc.id, "content": output})# 记录“每个工具调用的执行结果”，一答
 
-        messages.append({"role": "assistant", "content": response.content})
-        messages.append({"role": "user", "content": results})
+        messages.append({
+            "role": "assistant",
+            "content": message.content or "",
+            "tool_calls": assistant_tool_calls,
+        })
+        messages.extend(tool_messages)
 
 
 # =============================================================================
