@@ -1,59 +1,59 @@
 #!/usr/bin/env python3
 """
-v2_todo_agent.py - Mini Claude Code: Structured Planning (~300 lines)
+v2_todo_agent.py - Mini Claude Code：结构化规划（约 300 行）
 
-Core Philosophy: "Make Plans Visible"
-=====================================
-v1 works great for simple tasks. But ask it to "refactor auth, add tests,
-update docs" and watch what happens. Without explicit planning, the model:
-  - Jumps between tasks randomly
-  - Forgets completed steps
-  - Loses focus mid-way
+核心理念：“让计划可见”
+=====================
+v1 在简单任务上表现很好。但当你要求它“重构鉴权、补测试、更新文档”时，
+问题就会出现。没有显式规划时，模型会：
+    - 在任务之间随机跳转
+    - 忘记已经完成的步骤
+    - 中途失去焦点
 
-The Problem - "Context Fade":
-----------------------------
-In v1, plans exist only in the model's "head":
+问题——“上下文衰减”：
+--------------------
+在 v1 中，计划只存在于模型的“脑海”里：
 
-    v1: "I'll do A, then B, then C"  (invisible)
-        After 10 tool calls: "Wait, what was I doing?"
+        v1: “我先做 A，再做 B，然后做 C”（不可见）
+                10 次工具调用后：“等等，我刚刚在做什么？”
 
-The Solution - TodoWrite Tool:
------------------------------
-v2 adds ONE new tool that fundamentally changes how the agent works:
+解决方案——TodoWrite 工具：
+--------------------------
+v2 新增了一个工具，但它从根本上改变了代理的工作方式：
 
-    v2:
-      [ ] Refactor auth module
-      [>] Add unit tests         <- Currently working on this
-      [ ] Update documentation
+        v2:
+            [ ] 重构鉴权模块
+            [>] 添加单元测试         <- 当前正在做
+            [ ] 更新文档
 
-Now both YOU and the MODEL can see the plan. The model can:
-  - Update status as it works
-  - See what's done and what's next
-  - Stay focused on one task at a time
+现在你和模型都能看到计划。模型可以：
+    - 在执行过程中更新状态
+    - 明确知道已完成项和下一步
+    - 一次只专注于一个任务
 
-Key Constraints (not arbitrary - these are guardrails):
-------------------------------------------------------
-    | Rule              | Why                              |
-    |-------------------|----------------------------------|
-    | Max 20 items      | Prevents infinite task lists     |
-    | One in_progress   | Forces focus on one thing        |
-    | Required fields   | Ensures structured output        |
+关键约束（并非随意设定——它们是护栏）：
+----------------------------------------
+        | 规则              | 原因                            |
+        |-------------------|---------------------------------|
+        | 最多 20 项        | 防止生成无限任务清单            |
+        | 仅一个 in_progress| 强制一次只专注一件事            |
+        | 必填字段          | 保证结构化输出                  |
 
-The Deep Insight:
-----------------
-> "Structure constrains AND enables."
+深层洞察：
+----------
+> “结构既约束，也赋能。”
 
-Todo constraints (max items, one in_progress) ENABLE (visible plan, tracked progress).
+Todo 约束（最大数量、仅一个 in_progress）会“赋能”（计划可见、进度可跟踪）。
 
-This pattern appears everywhere in agent design:
-  - max_tokens constrains -> enables manageable responses
-  - Tool schemas constrain -> enable structured calls
-  - Todos constrain -> enable complex task completion
+这种模式在代理设计中随处可见：
+    - max_tokens 的约束 -> 使响应可控
+    - 工具 schema 的约束 -> 使调用结构化
+    - Todo 的约束 -> 支撑复杂任务完成
 
-Good constraints aren't limitations. They're scaffolding.
+好的约束不是限制，而是脚手架。
 
-Usage:
-    python v2_todo_agent.py
+用法：
+        python v2_todo_agent.py
 """
 
 import os
@@ -73,7 +73,7 @@ except ImportError:
 
 
 # =============================================================================
-# Configuration
+# 配置
 # =============================================================================
 
 API_KEY = os.getenv("OPENAI_API_KEY")
@@ -88,25 +88,25 @@ client = OpenAI(api_key=API_KEY, base_url=BASE_URL) if BASE_URL else OpenAI(api_
 
 
 # =============================================================================
-# TodoManager - The core addition in v2
+# TodoManager - v2 的核心新增
 # =============================================================================
 
 class TodoManager:
     """
-    Manages a structured task list with enforced constraints.
+    管理带有强约束的结构化任务清单。
 
-    Key Design Decisions:
+    关键设计决策：
     --------------------
-    1. Max 20 items: Prevents the model from creating endless lists
-    2. One in_progress: Forces focus - can only work on ONE thing at a time
-    3. Required fields: Each item needs content, status, and activeForm
+    1. 最多 20 项：防止模型生成无穷无尽的清单
+    2. 仅一个 in_progress：强制聚焦——同一时间只能做一件事
+    3. 必填字段：每个条目都需要 content、status、activeForm
 
-    The activeForm field deserves explanation:
-    - It's the PRESENT TENSE form of what's happening
-    - Shown when status is "in_progress"
-    - Example: content="Add tests", activeForm="Adding unit tests..."
+    activeForm 字段需要特别说明：
+    - 它表示“当前动作”的现在进行式
+    - 当 status 为 "in_progress" 时展示
+    - 示例：content="添加测试"，activeForm="正在添加单元测试..."
 
-    This gives real-time visibility into what the agent is doing.
+    这样就能实时看到代理正在做什么。
     """
 
     def __init__(self):
@@ -114,30 +114,30 @@ class TodoManager:
 
     def update(self, items: list) -> str:
         """
-        Validate and update the todo list.
+        校验并更新 todo 清单。
 
-        The model sends a complete new list each time. We validate it,
-        store it, and return a rendered view that the model will see.
+        模型每次都会发送一份完整的新清单。我们进行校验、存储，
+        并返回渲染后的视图供模型读取。
 
-        Validation Rules:
-        - Each item must have: content, status, activeForm
-        - Status must be: pending | in_progress | completed
-        - Only ONE item can be in_progress at a time
-        - Maximum 20 items allowed
+        校验规则：
+        - 每个条目必须包含：content、status、activeForm
+        - status 必须是：pending | in_progress | completed
+        - 同一时间只能有一个条目为 in_progress
+        - 最多允许 20 个条目
 
         Returns:
-            Rendered text view of the todo list
+            todo 清单的渲染文本视图
         """
         validated = []
         in_progress_count = 0
 
         for i, item in enumerate(items):
-            # Extract and validate fields
+            # 提取并校验字段
             content = str(item.get("content", "")).strip()
             status = str(item.get("status", "pending")).lower()
             active_form = str(item.get("activeForm", "")).strip()
 
-            # Validation checks
+            # 校验检查
             if not content:
                 raise ValueError(f"Item {i}: content required")
             if status not in ("pending", "in_progress", "completed"):
@@ -154,7 +154,7 @@ class TodoManager:
                 "activeForm": active_form
             })
 
-        # Enforce constraints
+        # 强制约束
         if len(validated) > 20:
             raise ValueError("Max 20 todos allowed")
         if in_progress_count > 1:
@@ -165,17 +165,17 @@ class TodoManager:
 
     def render(self) -> str:
         """
-        Render the todo list as human-readable text.
+        将 todo 清单渲染为人类可读文本。
 
-        Format:
-            [x] Completed task
-            [>] In progress task <- Doing something...
-            [ ] Pending task
+        格式：
+            [x] 已完成任务
+            [>] 进行中任务 <- 正在做某事...
+            [ ] 待处理任务
 
-            (2/3 completed)
+            （2/3 已完成）
 
-        This rendered text is what the model sees as the tool result.
-        It can then update the list based on its current state.
+        这段渲染文本会作为工具结果返回给模型。
+        模型随后可基于当前状态继续更新清单。
         """
         if not self.items:
             return "No todos."
@@ -195,12 +195,12 @@ class TodoManager:
         return "\n".join(lines)
 
 
-# Global todo manager instance
+# 全局 Todo 管理器实例
 TODO = TodoManager()
 
 
 # =============================================================================
-# System Prompt - Updated for v2
+# 系统提示词 - v2 更新版
 # =============================================================================
 
 SYSTEM = f"""You are a coding agent at {WORKDIR}.
@@ -215,22 +215,22 @@ Rules:
 
 
 # =============================================================================
-# System Reminders - Soft prompts to encourage todo usage
+# 系统提醒 - 用于鼓励使用 todo 的软提示
 # =============================================================================
 
-# Shown at the start of conversation
+# 在对话开始时显示
 INITIAL_REMINDER = "<reminder>Use TodoWrite for multi-step tasks.</reminder>"
 
-# Shown if model hasn't updated todos in a while
+# 当模型较长时间未更新 todo 时显示
 NAG_REMINDER = "<reminder>10+ turns without todo update. Please update todos.</reminder>"
 
 
 # =============================================================================
-# Tool Definitions (v1 tools + TodoWrite)
+# 工具定义（v1 工具 + TodoWrite）
 # =============================================================================
 
 TOOLS = [
-    # v1 tools (unchanged)
+    # v1 工具（不变）
     {
         "type": "function",
         "function": {
@@ -290,8 +290,8 @@ TOOLS = [
         },
     },
 
-    # NEW in v2: TodoWrite
-    # This is the key addition that enables structured planning
+    # v2 新增：TodoWrite
+    # 这是实现结构化规划的关键新增
     {
         "type": "function",
         "function": {
@@ -332,11 +332,11 @@ TOOLS = [
 
 
 # =============================================================================
-# Tool Implementations (v1 + TodoWrite)
+# 工具实现（v1 + TodoWrite）
 # =============================================================================
 
 def safe_path(p: str) -> Path:
-    """Ensure path stays within workspace."""
+    """确保路径始终位于工作区内。"""
     path = (WORKDIR / p).resolve()
     if not path.is_relative_to(WORKDIR):
         raise ValueError(f"Path escapes workspace: {p}")
@@ -344,7 +344,7 @@ def safe_path(p: str) -> Path:
 
 
 def run_bash(cmd: str) -> str:
-    """Execute shell command with safety checks."""
+    """执行带安全检查的 shell 命令。"""
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot"]
     if any(d in cmd for d in dangerous):
         return "Error: Dangerous command blocked"
@@ -362,7 +362,7 @@ def run_bash(cmd: str) -> str:
 
 
 def run_read(path: str, limit: int = None) -> str:
-    """Read file contents."""
+    """读取文件内容。"""
     try:
         text = safe_path(path).read_text()
         lines = text.splitlines()
@@ -374,7 +374,7 @@ def run_read(path: str, limit: int = None) -> str:
 
 
 def run_write(path: str, content: str) -> str:
-    """Write content to file."""
+    """将内容写入文件。"""
     try:
         fp = safe_path(path)
         fp.parent.mkdir(parents=True, exist_ok=True)
@@ -385,7 +385,7 @@ def run_write(path: str, content: str) -> str:
 
 
 def run_edit(path: str, old_text: str, new_text: str) -> str:
-    """Replace exact text in file."""
+    """在文件中精确替换文本。"""
     try:
         fp = safe_path(path)
         content = fp.read_text()
@@ -399,10 +399,10 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
 
 def run_todo(items: list) -> str:
     """
-    Update the todo list.
+    更新 todo 清单。
 
-    The model sends a complete new list (not a diff).
-    We validate it and return the rendered view.
+    模型会发送完整的新清单（而非 diff）。
+    我们进行校验并返回渲染视图。
     """
     try:
         return TODO.update(items)
@@ -411,7 +411,7 @@ def run_todo(items: list) -> str:
 
 
 def execute_tool(name: str, args: dict) -> str:
-    """Dispatch tool call to implementation."""
+    """将工具调用分发到对应实现。"""
     if name == "bash":
         return run_bash(args["command"])
     if name == "read_file":
@@ -426,20 +426,19 @@ def execute_tool(name: str, args: dict) -> str:
 
 
 # =============================================================================
-# Agent Loop (with todo tracking)
+# 代理循环（含 todo 跟踪）
 # =============================================================================
 
-# Track how many rounds since last todo update
+# 记录距离上次更新 todo 经过了多少轮
 rounds_without_todo = 0
 
 
 def agent_loop(messages: list) -> list:
     """
-    Agent loop with todo usage tracking.
+    带有 todo 使用跟踪的代理循环。
 
-    Same core loop as v1, but now we track whether the model
-    is using todos. If it goes too long without updating,
-    we'll inject a reminder in the main() function.
+    核心循环与 v1 相同，但现在会跟踪模型是否使用了 todo。
+    如果长时间未更新，会在 main() 中注入提醒。
     """
     global rounds_without_todo
 
@@ -488,11 +487,11 @@ def agent_loop(messages: list) -> list:
                 "content": output,
             })
 
-            # Track todo usage
+            # 跟踪 todo 使用情况
             if tool_name == "TodoWrite":
                 used_todo = True
 
-        # Update counter: reset if used todo, increment otherwise
+        # 更新计数器：如果用了 todo 就重置，否则递增
         if used_todo:
             rounds_without_todo = 0
         else:
@@ -502,19 +501,18 @@ def agent_loop(messages: list) -> list:
 
 
 # =============================================================================
-# Main REPL
+# 主 REPL
 # =============================================================================
 
 def main():
     """
-    REPL with reminder injection.
+    带提醒注入的 REPL。
 
-    Key v2 addition: We inject "reminder" messages to encourage
-    todo usage without forcing it. This is a soft constraint.
+    v2 的关键新增：注入“提醒”消息，以鼓励使用 todo，
+    但不进行强制。这属于软约束。
 
-    Reminders are injected as part of the user message, not as
-    separate system prompts. The model sees them but doesn't
-    respond to them directly.
+    提醒会作为用户消息的一部分注入，而不是独立系统提示词。
+    模型会看到它们，但不会直接回复这些提醒。
     """
     global rounds_without_todo
 
@@ -524,7 +522,7 @@ def main():
     history = []
     first_message = True
 
-    # OpenAI requires explicit system message in the conversation
+    # OpenAI 要求在对话中显式包含 system 消息
     history.append({"role": "system", "content": SYSTEM})
 
     while True:
@@ -536,16 +534,16 @@ def main():
         if not user_input or user_input.lower() in ("exit", "quit", "q"):
             break
 
-        # Build user message content
-        # May include reminders as context hints
+        # 构建用户消息内容
+        # 可能包含作为上下文提示的提醒
         content = []
 
         if first_message:
-            # Gentle reminder at start
+            # 开始时给一个温和提醒
             content.append(INITIAL_REMINDER)
             first_message = False
         elif rounds_without_todo > 10:
-            # Nag if model hasn't used todos in a while
+            # 若模型一段时间未使用 todo，则进行催促
             content.append(NAG_REMINDER)
 
         content.append(user_input)
