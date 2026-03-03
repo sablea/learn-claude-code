@@ -49,18 +49,18 @@ import threading
 import time
 from pathlib import Path
 
-from anthropic import Anthropic
+from openai import OpenAI
 from dotenv import load_dotenv
+from utils.message_persistence import MessagePersister
 
 load_dotenv(override=True)
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
+client = OpenAI(base_url=os.getenv("OPENAI_BASE_URL") or os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 TEAM_DIR = WORKDIR / ".team"
 INBOX_DIR = TEAM_DIR / "inbox"
+LEAD_PERSISTER = MessagePersister(WORKDIR, "s09_agent_teams_lead_messages")
 
 SYSTEM = f"You are a team lead at {WORKDIR}. Spawn teammates and communicate via inboxes."
 
@@ -71,6 +71,37 @@ VALID_MSG_TYPES = {
     "shutdown_response",
     "plan_approval_response",
 }
+
+
+def to_openai_tools(tools: list) -> list:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+            },
+        }
+        for t in tools
+    ]
+
+
+def make_assistant_message(msg) -> dict:
+    assistant = {"role": "assistant", "content": msg.content or ""}
+    if msg.tool_calls:
+        assistant["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments or "{}",
+                },
+            }
+            for tc in msg.tool_calls
+        ]
+    return assistant
 
 
 # -- MessageBus: JSONL inbox per teammate --
@@ -168,35 +199,43 @@ class TeammateManager:
             f"Use send_message to communicate. Complete your task."
         )
         messages = [{"role": "user", "content": prompt}]
+        teammate_persister = MessagePersister(WORKDIR, f"s09_agent_teams_{name}_messages")
+        teammate_persister.persist(messages, note="teammate_start")
         tools = self._teammate_tools()
         for _ in range(50):
             inbox = BUS.read_inbox(name)
             for msg in inbox:
                 messages.append({"role": "user", "content": json.dumps(msg)})
+            if inbox:
+                teammate_persister.persist(messages, note="teammate_inbox")
             try:
-                response = client.messages.create(
+                response = client.chat.completions.create(
                     model=MODEL,
-                    system=sys_prompt,
-                    messages=messages,
-                    tools=tools,
+                    messages=[{"role": "system", "content": sys_prompt}, *messages],
+                    tools=to_openai_tools(tools),
                     max_tokens=8000,
                 )
             except Exception:
                 break
-            messages.append({"role": "assistant", "content": response.content})
-            if response.stop_reason != "tool_use":
+            msg = response.choices[0].message
+            messages.append(make_assistant_message(msg))
+            teammate_persister.persist(messages, note="teammate_assistant_response")
+            if not msg.tool_calls:
+                teammate_persister.persist(messages, note="teammate_assistant_final")
                 break
-            results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    output = self._exec(name, block.name, block.input)
-                    print(f"  [{name}] {block.name}: {str(output)[:120]}")
-                    results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": str(output),
-                    })
-            messages.append({"role": "user", "content": results})
+            for tc in msg.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                output = self._exec(name, tc.function.name, args)
+                print(f"  [{name}] {tc.function.name}: {str(output)[:120]}")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": str(output),
+                })
+                teammate_persister.persist(messages, note="teammate_tool_result")
         member = self._find_member(name)
         if member and member["status"] != "shutdown":
             member["status"] = "idle"
@@ -353,34 +392,41 @@ def agent_loop(messages: list):
                 "role": "assistant",
                 "content": "Noted inbox messages.",
             })
-        response = client.messages.create(
+            LEAD_PERSISTER.persist(messages, note="lead_inbox")
+        response = client.chat.completions.create(
             model=MODEL,
-            system=SYSTEM,
-            messages=messages,
-            tools=TOOLS,
+            messages=[{"role": "system", "content": SYSTEM}, *messages],
+            tools=to_openai_tools(TOOLS),
             max_tokens=8000,
         )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        msg = response.choices[0].message
+        messages.append(make_assistant_message(msg))
+        LEAD_PERSISTER.persist(messages, note="assistant_response")
+        if not msg.tool_calls:
+            LEAD_PERSISTER.persist(messages, note="assistant_final")
             return
-        results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                try:
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                except Exception as e:
-                    output = f"Error: {e}"
-                print(f"> {block.name}: {str(output)[:200]}")
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": str(output),
-                })
-        messages.append({"role": "user", "content": results})
+
+        for tc in msg.tool_calls:
+            handler = TOOL_HANDLERS.get(tc.function.name)
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            try:
+                output = handler(**args) if handler else f"Unknown tool: {tc.function.name}"
+            except Exception as e:
+                output = f"Error: {e}"
+            print(f"> {tc.function.name}: {str(output)[:200]}")
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": str(output),
+            })
+            LEAD_PERSISTER.persist(messages, note="tool_result")
 
 
 if __name__ == "__main__":
+    print(f"Message log: {LEAD_PERSISTER.message_log_path}")
     history = []
     while True:
         try:
@@ -396,5 +442,6 @@ if __name__ == "__main__":
             print(json.dumps(BUS.read_inbox("lead"), indent=2))
             continue
         history.append({"role": "user", "content": query})
+        LEAD_PERSISTER.persist(history, note="user_input")
         agent_loop(history)
         print()

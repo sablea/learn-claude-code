@@ -28,6 +28,7 @@ from pathlib import Path
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
+from utils.message_persistence import MessagePersister
 
 load_dotenv(override=True)
 
@@ -37,6 +38,7 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
+PERSISTER = MessagePersister(WORKDIR, "s04_subagent_messages")
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use the task tool to delegate exploration or subtasks."
 SUBAGENT_SYSTEM = f"You are a coding subagent at {WORKDIR}. Complete the given task, then summarize your findings."
@@ -147,7 +149,9 @@ def agent_loop(messages: list):
             tools=PARENT_TOOLS, max_tokens=8000,
         )
         messages.append({"role": "assistant", "content": response.content})
+        PERSISTER.persist(messages, note="assistant_response")
         if response.stop_reason != "tool_use":
+            PERSISTER.persist(messages, note="assistant_final")
             return
         results = []
         for block in response.content:
@@ -162,9 +166,11 @@ def agent_loop(messages: list):
                 print(f"  {str(output)[:200]}")
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
         messages.append({"role": "user", "content": results})
+            PERSISTER.persist(messages, note="tool_results")
 
 
 if __name__ == "__main__":
+    print(f"Message log: {PERSISTER.message_log_path}")
     history = []
     while True:
         try:
@@ -174,5 +180,6 @@ if __name__ == "__main__":
         if query.strip().lower() in ("q", "exit", ""):
             break
         history.append({"role": "user", "content": query})
+        PERSISTER.persist(history, note="user_input")
         agent_loop(history)
         print()
