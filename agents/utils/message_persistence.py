@@ -5,10 +5,11 @@ from typing import Any
 
 
 class MessagePersister:
-    def __init__(self, workdir: Path, file_prefix: str = "s03_todo_write_messages"):
+    def __init__(self, workdir: Path, file_prefix: str = "s03_todo_write_messages", system: str = ""):
         self.session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.log_dir = workdir / ".agent_logs"
         self.message_log_path = self.log_dir / f"{file_prefix}_{self.session_id}.json"
+        self.system = system
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
     def persist(self, messages: list, note: str = "") -> None:
@@ -17,6 +18,7 @@ class MessagePersister:
                 "session_id": self.session_id,
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
                 "note": note,
+                "system": self.system,
                 "messages": self._to_jsonable(messages),
             }
             self.message_log_path.write_text(

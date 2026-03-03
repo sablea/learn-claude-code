@@ -42,6 +42,7 @@ PERSISTER = MessagePersister(WORKDIR, "s04_subagent_messages")
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use the task tool to delegate exploration or subtasks."
 SUBAGENT_SYSTEM = f"You are a coding subagent at {WORKDIR}. Complete the given task, then summarize your findings."
+PERSISTER.system = SYSTEM
 
 
 # -- Tool implementations shared by parent and child --

@@ -25,7 +25,7 @@ forces it to keep updating when it forgets.
 
 Key insight: "The agent can track its own progress -- and I can see it."
 """
-
+import readline
 import os
 import subprocess
 from pathlib import Path
@@ -47,6 +47,7 @@ PERSISTER = MessagePersister(WORKDIR)
 SYSTEM = f"""You are a coding agent at {WORKDIR}.
 Use the todo tool to plan multi-step tasks. Mark in_progress before starting, completed when done.
 Prefer tools over prose."""
+PERSISTER.system = SYSTEM
 
 
 # -- TodoManager: structured state the LLM writes to --

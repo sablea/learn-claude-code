@@ -221,3 +221,5 @@ web/out/
 .vercel
 .env*.local
 test_providers.py
+
+.agent_logs/*

@@ -107,6 +107,7 @@ Use load_skill to access specialized knowledge before tackling unfamiliar topics
 
 Skills available:
 {SKILL_LOADER.get_descriptions()}"""
+PERSISTER.system = SYSTEM
 
 
 # -- Tool implementations --

@@ -39,6 +39,7 @@ MODEL = os.environ["MODEL_ID"]
 PERSISTER = MessagePersister(Path(os.getcwd()), "s01_agent_loop_messages")
 
 SYSTEM = f"You are a coding agent at {os.getcwd()}. Use bash to solve tasks. Act, don't explain."
+PERSISTER.system = SYSTEM
 
 TOOLS = [{
     "name": "bash",

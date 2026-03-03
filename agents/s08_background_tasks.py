@@ -45,6 +45,7 @@ MODEL = os.environ["MODEL_ID"]
 PERSISTER = MessagePersister(WORKDIR, "s08_background_tasks_messages")
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use background_run for long-running commands."
+PERSISTER.system = SYSTEM
 
 
 # -- BackgroundManager: threaded execution + notification queue --

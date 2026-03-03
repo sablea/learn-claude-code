@@ -63,6 +63,7 @@ INBOX_DIR = TEAM_DIR / "inbox"
 LEAD_PERSISTER = MessagePersister(WORKDIR, "s09_agent_teams_lead_messages")
 
 SYSTEM = f"You are a team lead at {WORKDIR}. Spawn teammates and communicate via inboxes."
+LEAD_PERSISTER.system = SYSTEM
 
 VALID_MSG_TYPES = {
     "message",
@@ -199,7 +200,7 @@ class TeammateManager:
             f"Use send_message to communicate. Complete your task."
         )
         messages = [{"role": "user", "content": prompt}]
-        teammate_persister = MessagePersister(WORKDIR, f"s09_agent_teams_{name}_messages")
+        teammate_persister = MessagePersister(WORKDIR, f"s09_agent_teams_{name}_messages", system=sys_prompt)
         teammate_persister.persist(messages, note="teammate_start")
         tools = self._teammate_tools()
         for _ in range(50):

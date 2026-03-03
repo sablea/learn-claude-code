@@ -37,6 +37,7 @@ MODEL = os.environ["MODEL_ID"]
 PERSISTER = MessagePersister(WORKDIR, "s02_tool_use_messages")
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks. Act, don't explain."
+PERSISTER.system = SYSTEM
 
 
 def safe_path(p: str) -> Path:

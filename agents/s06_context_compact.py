@@ -54,6 +54,7 @@ MODEL = os.environ["MODEL_ID"]
 PERSISTER = MessagePersister(WORKDIR, "s06_context_compact_messages")
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks."
+PERSISTER.system = SYSTEM
 
 THRESHOLD = 50000
 TRANSCRIPT_DIR = WORKDIR / ".transcripts"

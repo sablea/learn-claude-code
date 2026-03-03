@@ -42,6 +42,7 @@ TASKS_DIR = WORKDIR / ".tasks"
 PERSISTER = MessagePersister(WORKDIR, "s07_task_system_messages")
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use task tools to plan and track work."
+PERSISTER.system = SYSTEM
 
 
 # -- TaskManager: CRUD with dependency graph, persisted as JSON files --
