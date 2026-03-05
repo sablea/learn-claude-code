@@ -25,6 +25,7 @@ Key insight: "Process isolation gives context isolation for free."
 import os
 import subprocess
 from pathlib import Path
+import readline
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -39,6 +40,7 @@ WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 PERSISTER = MessagePersister(WORKDIR, "s04_subagent_messages")
+SUBAGENT_RUN_ID = 0
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use the task tool to delegate exploration or subtasks."
 SUBAGENT_SYSTEM = f"You are a coding subagent at {WORKDIR}. Complete the given task, then summarize your findings."
@@ -114,16 +116,26 @@ CHILD_TOOLS = [
 ]
 
 
-# -- Subagent: fresh context, filtered tools, summary-only return --
-def run_subagent(prompt: str) -> str:
+# -- Subagent: fresh context, filtered tools, summary + log path return --
+def run_subagent(prompt: str) -> tuple[str, str]:
+    global SUBAGENT_RUN_ID
+    SUBAGENT_RUN_ID += 1
+    sub_persister = MessagePersister(
+        WORKDIR,
+        f"s04_subagent_child_{SUBAGENT_RUN_ID:03d}",
+        system=SUBAGENT_SYSTEM,
+    )
     sub_messages = [{"role": "user", "content": prompt}]  # fresh context
+    sub_persister.persist(sub_messages, note="subagent_user_input")
     for _ in range(30):  # safety limit
         response = client.messages.create(
             model=MODEL, system=SUBAGENT_SYSTEM, messages=sub_messages,
             tools=CHILD_TOOLS, max_tokens=8000,
         )
         sub_messages.append({"role": "assistant", "content": response.content})
+        sub_persister.persist(sub_messages, note="subagent_assistant_response")
         if response.stop_reason != "tool_use":
+            sub_persister.persist(sub_messages, note="subagent_assistant_final")
             break
         results = []
         for block in response.content:
@@ -132,8 +144,11 @@ def run_subagent(prompt: str) -> str:
                 output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)[:50000]})
         sub_messages.append({"role": "user", "content": results})
-    # Only the final text returns to the parent -- child context is discarded
-    return "".join(b.text for b in response.content if hasattr(b, "text")) or "(no summary)"
+        sub_persister.persist(sub_messages, note="subagent_tool_results")
+    # Return summary plus child log path so parent logs can link to child session.
+    summary = "".join(b.text for b in response.content if hasattr(b, "text")) or "(no summary)"
+    child_log = str(sub_persister.message_log_path.relative_to(WORKDIR))
+    return summary, child_log
 
 
 # -- Parent tools: base tools + task dispatcher --
@@ -160,14 +175,19 @@ def agent_loop(messages: list):
                 if block.name == "task":
                     desc = block.input.get("description", "subtask")
                     print(f"> task ({desc}): {block.input['prompt'][:80]}")
-                    output = run_subagent(block.input["prompt"])
+                    summary, child_log = run_subagent(block.input["prompt"])
+                    print(f"  subagent log: {child_log}")
+                    output = {
+                        "summary": summary,
+                        "subagent_log": child_log,
+                    }
                 else:
                     handler = TOOL_HANDLERS.get(block.name)
                     output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                print(f"  {str(output)[:200]}")
+                
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
         messages.append({"role": "user", "content": results})
-            PERSISTER.persist(messages, note="tool_results")
+        PERSISTER.persist(messages, note="tool_results")
 
 
 if __name__ == "__main__":

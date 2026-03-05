@@ -32,6 +32,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+import readline
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -45,11 +46,11 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
-SKILLS_DIR = WORKDIR / ".skills"
+SKILLS_DIR = WORKDIR / "skills"
 PERSISTER = MessagePersister(WORKDIR, "s05_skill_loading_messages")
 
 
-# -- SkillLoader: parse .skills/*.md files with YAML frontmatter --
+# -- SkillLoader: parse skills/*/SKILL.md files with YAML frontmatter --
 class SkillLoader:
     def __init__(self, skills_dir: Path):
         self.skills_dir = skills_dir
@@ -57,13 +58,12 @@ class SkillLoader:
         self._load_all()
 
     def _load_all(self):
-        if not self.skills_dir.exists():
-            return
-        for f in sorted(self.skills_dir.glob("*.md")):
-            name = f.stem
-            text = f.read_text()
-            meta, body = self._parse_frontmatter(text)
-            self.skills[name] = {"meta": meta, "body": body, "path": str(f)}
+        if self.skills_dir.exists():
+            for f in sorted(self.skills_dir.glob("*/SKILL.md")):
+                name = f.parent.name
+                text = f.read_text()
+                meta, body = self._parse_frontmatter(text)
+                self.skills[name] = {"meta": meta, "body": body, "path": str(f)}
 
     def _parse_frontmatter(self, text: str) -> tuple:
         """Parse YAML frontmatter between --- delimiters."""
@@ -203,7 +203,7 @@ def agent_loop(messages: list):
                 print(f"> {block.name}: {str(output)[:200]}")
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
         messages.append({"role": "user", "content": results})
-            PERSISTER.persist(messages, note="tool_results")
+        PERSISTER.persist(messages, note="tool_results")
 
 
 if __name__ == "__main__":
