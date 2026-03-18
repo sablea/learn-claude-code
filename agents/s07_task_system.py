@@ -231,7 +231,7 @@ def agent_loop(messages: list):
                 print(f"> {block.name}: {str(output)[:200]}")
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
         messages.append({"role": "user", "content": results})
-            PERSISTER.persist(messages, note="tool_results")
+        PERSISTER.persist(messages, note="tool_results")
 
 
 if __name__ == "__main__":
