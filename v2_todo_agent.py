@@ -55,7 +55,7 @@ Todo 约束（最大数量、仅一个 in_progress）会“赋能”（计划可
 用法：
         python v2_todo_agent.py
 """
-
+import readline
 import os
 import subprocess
 import sys
@@ -70,6 +70,110 @@ try:
     from openai import OpenAI
 except ImportError:
     sys.exit("Please install: pip install openai python-dotenv")
+
+
+# =============================================================================
+# 控制台输出美化
+# =============================================================================
+
+class Style:
+    """ANSI 终端颜色和样式常量。"""
+    RESET  = "\033[0m"
+    BOLD   = "\033[1m"
+    DIM    = "\033[2m"
+    RED    = "\033[31m"
+    GREEN  = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE   = "\033[34m"
+    MAGENTA= "\033[35m"
+    CYAN   = "\033[36m"
+    GRAY   = "\033[90m"
+
+
+def _print_separator(step: int):
+    """打印步骤分隔线。"""
+    line = f"{'─' * 3} Step {step} {'─' * 40}"
+    print(f"\n{Style.DIM}{line}{Style.RESET}")
+
+
+def _print_tool_header(tool_name: str, args: dict):
+    """
+    根据工具类型打印简洁的调用信息（一行）。
+
+    设计原则：让用户一眼看到"做了什么"，而不是工具的原始名称。
+    - bash: 显示实际命令
+    - read_file: 显示文件路径
+    - write_file: 显示路径和大小
+    - edit_file: 显示路径
+    - TodoWrite: 显示标题
+    """
+    if tool_name == "bash":
+        cmd = args.get("command", "")
+        if len(cmd) > 120:
+            cmd = cmd[:117] + "..."
+        print(f"  {Style.CYAN}${Style.RESET} {cmd}")
+    elif tool_name == "read_file":
+        path = args.get("path", "")
+        limit = args.get("limit")
+        suffix = f" (limit: {limit})" if limit else ""
+        print(f"  {Style.BLUE}▶ read{Style.RESET} {path}{Style.DIM}{suffix}{Style.RESET}")
+    elif tool_name == "write_file":
+        path = args.get("path", "")
+        size = len(args.get("content", ""))
+        print(f"  {Style.GREEN}▶ write{Style.RESET} {path} {Style.DIM}({size} bytes){Style.RESET}")
+    elif tool_name == "edit_file":
+        path = args.get("path", "")
+        print(f"  {Style.YELLOW}▶ edit{Style.RESET} {path}")
+    elif tool_name == "TodoWrite":
+        print(f"  {Style.MAGENTA}▶ todo{Style.RESET}")
+    else:
+        print(f"  {Style.DIM}▶ {tool_name}{Style.RESET}")
+
+
+def _print_tool_result(tool_name: str, output: str):
+    """
+    根据工具类型打印精简的执行结果。
+
+    核心思路：不同工具的"有用信息"不同——
+    - bash 输出需要看，但要截断
+    - read_file 读了什么不重要，行数才重要
+    - write_file / edit_file 只需要成功/失败状态
+    - TodoWrite 需要彩色渲染完整清单
+    """
+    if tool_name == "TodoWrite":
+        for line in output.splitlines():
+            if line.startswith("[x]"):
+                print(f"    {Style.GREEN}✔ {line[4:]}{Style.RESET}")
+            elif line.startswith("[>]"):
+                print(f"    {Style.YELLOW}▸ {line[4:]}{Style.RESET}")
+            elif line.startswith("[ ]"):
+                print(f"    {Style.DIM}○ {line[4:]}{Style.RESET}")
+            elif line.strip():
+                print(f"    {Style.DIM}{line.strip()}{Style.RESET}")
+    elif tool_name == "bash":
+        if output.startswith("Error"):
+            print(f"    {Style.RED}{output[:200]}{Style.RESET}")
+        else:
+            lines = output.splitlines()
+            show = lines[:8]
+            for ln in show:
+                print(f"    {Style.DIM}{ln}{Style.RESET}")
+            if len(lines) > 8:
+                print(f"    {Style.DIM}... ({len(lines) - 8} more lines){Style.RESET}")
+    elif tool_name == "read_file":
+        if output.startswith("Error"):
+            print(f"    {Style.RED}{output}{Style.RESET}")
+        else:
+            n = len(output.splitlines())
+            print(f"    {Style.DIM}({n} lines){Style.RESET}")
+    elif tool_name in ("write_file", "edit_file"):
+        if output.startswith("Error"):
+            print(f"    {Style.RED}{output}{Style.RESET}")
+        else:
+            print(f"    {Style.GREEN}✔ {output}{Style.RESET}")
+    else:
+        preview = output[:200] + "..." if len(output) > 200 else output
+        print(f"    {Style.DIM}{preview}{Style.RESET}")
 
 
 # =============================================================================
@@ -431,6 +535,8 @@ def execute_tool(name: str, args: dict) -> str:
 
 # 记录距离上次更新 todo 经过了多少轮
 rounds_without_todo = 0
+# 当前步骤计数器
+_step_counter = 0
 
 
 def agent_loop(messages: list) -> list:
@@ -439,10 +545,18 @@ def agent_loop(messages: list) -> list:
 
     核心循环与 v1 相同，但现在会跟踪模型是否使用了 todo。
     如果长时间未更新，会在 main() 中注入提醒。
+
+    v2 输出优化：
+    - 每轮显示步骤编号分隔线
+    - 根据工具类型差异化显示：命令/路径/todo 清单
+    - 按信息价值截断输出：bash 最多 8 行，read_file 只显示行数
     """
-    global rounds_without_todo
+    global rounds_without_todo, _step_counter
 
     while True:
+        _step_counter += 1
+        _print_separator(_step_counter)
+
         response = client.chat.completions.create(
             model=MODEL,
             messages=messages,
@@ -454,8 +568,9 @@ def agent_loop(messages: list) -> list:
         assistant_message = response.choices[0].message
         tool_calls = assistant_message.tool_calls or []
 
+        # 模型的文字输出用粗体前缀区分
         if assistant_message.content:
-            print(assistant_message.content)
+            print(f"  {Style.BOLD}Agent:{Style.RESET} {assistant_message.content}")
 
         if not tool_calls:
             messages.append({
@@ -476,10 +591,10 @@ def agent_loop(messages: list) -> list:
             except json.JSONDecodeError:
                 tool_args = {}
 
-            print(f"\n> {tool_name}")
+            # 智能显示：工具调用头 + 精简结果
+            _print_tool_header(tool_name, tool_args)
             output = execute_tool(tool_name, tool_args)
-            preview = output[:300] + "..." if len(output) > 300 else output
-            print(f"  {preview}")
+            _print_tool_result(tool_name, output)
 
             results.append({
                 "role": "tool",
@@ -514,10 +629,11 @@ def main():
     提醒会作为用户消息的一部分注入，而不是独立系统提示词。
     模型会看到它们，但不会直接回复这些提醒。
     """
-    global rounds_without_todo
+    global rounds_without_todo, _step_counter
 
-    print(f"Mini Claude Code v2 (with Todos) - {WORKDIR}")
-    print("Type 'exit' to quit.\n")
+    print(f"{Style.BOLD}Mini Claude Code v2{Style.RESET} {Style.DIM}(with Todos){Style.RESET}")
+    print(f"{Style.DIM}{WORKDIR}{Style.RESET}")
+    print(f"{Style.DIM}Type 'exit' to quit.{Style.RESET}\n")
 
     history = []
     first_message = True
@@ -549,10 +665,13 @@ def main():
         content.append(user_input)
         history.append({"role": "user", "content": "\n".join(content)})
 
+        # 每次用户输入时重置步骤计数器
+        _step_counter = 0
+
         try:
             agent_loop(history)
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"{Style.RED}Error: {e}{Style.RESET}")
 
         print()
 
