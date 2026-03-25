@@ -196,6 +196,9 @@ cython_debug/
 .tasks/
 .teams/
 
+# Industrial retrieval agent runtime data (generated from SAMPLE_* constants in code)
+data/
+
 # Ruff stuff:
 .ruff_cache/
 
